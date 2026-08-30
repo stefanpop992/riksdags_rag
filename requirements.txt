@@ -1,2 +1,5 @@
 requests>=2.31
 tqdm>=4.66
+torch>=2.0
+sentence-transformers>=3.0
+chromadb>=0.5

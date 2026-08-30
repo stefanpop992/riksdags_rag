@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -46,18 +47,42 @@ def rensa_html(rahtml):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def hamta_json(session, url, forsok=3):
-    """Hämtar en URL och returnerar JSON. Försöker igen vid tillfälliga fel."""
+def hamta_url(session, url, forsok=3):
+    """Hämtar en URL och returnerar råsvaret som text. Försöker igen vid nätverksfel."""
     for n in range(forsok):
         try:
             svar = session.get(url, timeout=60)
             svar.raise_for_status()
-            return svar.json()
+            return svar.text
         except Exception as fel:
             if n == forsok - 1:
                 print(f"\nGav upp på {url}: {fel}", file=sys.stderr)
                 return None
             time.sleep(2 ** n)  # 1s, 2s, 4s ...
+
+
+def tolka_anforande(rasvar):
+    """Plockar ut anförandet ur svaret, som kan vara antingen JSON eller XML.
+
+    Ett fåtal anföranden är registrerade två gånger hos riksdagen. För dem
+    skickar API:et XML i stället för JSON, och dessutom två <anforande> efter
+    varandra utan gemensam rot - alltså varken giltig JSON eller giltig XML.
+    Vi provar JSON först, och lindar annars in svaret i en egen rot så att
+    XML-tolkaren klarar det. De två posterna har samma text, så vi tar första.
+    """
+    try:
+        return json.loads(rasvar).get("anforande", {})
+    except json.JSONDecodeError:
+        pass
+    try:
+        rot = ET.fromstring(f"<rot>{rasvar}</rot>")
+    except ET.ParseError:
+        return None
+
+    forsta = rot.find("anforande")
+    if forsta is None:
+        return None
+    return {barn.tag: (barn.text or "") for barn in forsta}
 
 
 def hamta_lista(session, riksmote, listkatalog, uppdatera=False):
@@ -68,21 +93,38 @@ def hamta_lista(session, riksmote, listkatalog, uppdatera=False):
     """
     cache = listkatalog / f"anforandelista_{filnamn(riksmote)}.json"
     if cache.exists() and not uppdatera:
-        return json.loads(cache.read_text(encoding="utf-8"))
+        return avdublettera(json.loads(cache.read_text(encoding="utf-8")))
 
     # sz = hur många träffar vi vill ha. API:et har ingen sidnumrering,
     # så vi tar hela riksmötet i ett svar och låter rm vara vår "sida".
     url = f"{API}/anforandelista/?rm={riksmote}&sz=20000&utformat=json"
-    data = hamta_json(session, url)
-    if data is None:
+    rasvar = hamta_url(session, url)
+    if rasvar is None:
         return []
 
-    rader = data.get("anforandelista", {}).get("anforande", [])
+    rader = json.loads(rasvar).get("anforandelista", {}).get("anforande", [])
     if isinstance(rader, dict):  # API:et hoppar över listan vid exakt en träff
         rader = [rader]
 
     cache.write_text(json.dumps(rader, ensure_ascii=False), encoding="utf-8")
-    return rader
+    return avdublettera(rader)
+
+
+def avdublettera(rader):
+    """Tar bort dubbletter ur listan.
+
+    Ett fåtal anföranden är registrerade två gånger hos riksdagen, med olika
+    anforande_id men samma dok_id och anforande_nummer. Eftersom det är just
+    dok_id + nummer som pekar ut texten är det samma tal två gånger, så vi
+    behåller det första.
+    """
+    sedda, unika = set(), []
+    for rad in rader:
+        nyckel = (rad.get("dok_id"), rad.get("anforande_nummer"))
+        if nyckel not in sedda:
+            sedda.add(nyckel)
+            unika.append(rad)
+    return unika
 
 
 def las_klara_ids(sokvag):
@@ -112,11 +154,15 @@ def las_klara_ids(sokvag):
 def hamta_anforande(session, rad):
     """Hämtar fulltexten för ett anförande och plockar ut fälten vi vill ha."""
     url = rad.get("anforande_url_xml") or f"{API}/anforande/{rad['dok_id']}-{rad['anforande_nummer']}"
-    data = hamta_json(session, url + "/json")
-    if data is None:
+    rasvar = hamta_url(session, url + "/json")
+    if rasvar is None:
         return None
 
-    full = data.get("anforande", {})
+    full = tolka_anforande(rasvar)
+    if full is None:
+        print(f"\nKunde inte tolka svaret från {url}", file=sys.stderr)
+        return None
+
     rahtml = full.get("anforandetext", "")
     return {
         "anforande_id": rad["anforande_id"],
