@@ -142,6 +142,27 @@ def bygg_chunkar(anforande):
     return poster
 
 
+def batcha_hela_anforanden(per_anforande, max_storlek):
+    """Packar chunks till batchar utan att någonsin klyva ett anförande.
+
+    Återupptagningen ser ett anförande som klart så snart någon av dess chunks
+    finns i databasen. Det stämmer bara om alla chunks för ett anförande skrivs
+    i samma databasoperation - annars kan ett avbrott mitt i en fil lämna ett
+    anförande halvindexerat, och då hoppas resten över för alltid.
+
+    En batch kan därför bli något större än max_storlek, men aldrig delad mitt
+    i ett tal.
+    """
+    batch = []
+    for chunkar in per_anforande:
+        if batch and len(batch) + len(chunkar) > max_storlek:
+            yield batch
+            batch = []
+        batch.extend(chunkar)
+    if batch:
+        yield batch
+
+
 def las_anforanden(fil):
     """Läser en JSONL-fil och returnerar en lista med anföranden."""
     anforanden = []
@@ -221,12 +242,11 @@ def main():
 
         # Vi bygger alla chunks för filen först, och embeddar dem sedan i
         # batchar. GPU:n är snabbast när den får många texter på en gång.
-        poster = []
-        for a in att_gora:
-            poster.extend(bygg_chunkar(a))
+        per_anforande = [bygg_chunkar(a) for a in att_gora]
+        batchar = list(batcha_hela_anforanden(per_anforande, args.batch_size))
+        antal_chunkar_i_filen = sum(len(b) for b in batchar)
 
-        for start in tqdm(range(0, len(poster), args.batch_size), unit="batch"):
-            grupp = poster[start:start + args.batch_size]
+        for grupp in tqdm(batchar, unit="batch"):
             ider = [p[0] for p in grupp]
             texter = [p[1] for p in grupp]
             metadata = [p[2] for p in grupp]
@@ -244,7 +264,7 @@ def main():
                            embeddings=vektorer.tolist())
 
         nya_anforanden += len(att_gora)
-        nya_chunkar += len(poster)
+        nya_chunkar += antal_chunkar_i_filen
         if kvar is not None:
             kvar -= len(att_gora)
 
