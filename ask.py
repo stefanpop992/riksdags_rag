@@ -119,8 +119,22 @@ def main():
             print("Sökningen gav inga träffar. Prova en bredare fråga eller ta bort filtren.")
         else:
             visa_traffar(traffar)
+
+            # Tänkandet går till stderr, svaret till stdout. Då kan du fortfarande
+            # pipa svaret vidare till en fil utan att resonemanget följer med.
+            skrivit_rubrik = []
+
+            def visa_tanke(bit):
+                if not skrivit_rubrik:
+                    print("  [tänker] ", end="", file=sys.stderr, flush=True)
+                    skrivit_rubrik.append(True)
+                print(bit, end="", file=sys.stderr, flush=True)
+
             print("Svar:\n")
-            for bit in rag.stromma_svar(klient, fraga, underlag, args.model):
+            for bit in rag.stromma_svar(klient, fraga, underlag, args.model, visa_tanke):
+                if skrivit_rubrik:
+                    print(file=sys.stderr)
+                    skrivit_rubrik.clear()
                 print(bit, end="", flush=True)
             print("\n")
 

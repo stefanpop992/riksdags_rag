@@ -202,12 +202,16 @@ def bygg_underlag(traffar):
     return "\n\n".join(delar)
 
 
-def stromma_svar(klient, fraga, underlag, modell=SVARSMODELL):
+def stromma_svar(klient, fraga, underlag, modell=SVARSMODELL, pa_tanke=None):
     """Frågar Claude och lämnar tillbaka svaret bit för bit.
 
     Funktionen är en generator i stället för att skriva ut något själv. Då kan
     ask.py printa bitarna medan de kommer, och app.py skicka samma bitar till
     st.write_stream - utan att den här koden vet vilket som gäller.
+
+    pa_tanke är en valfri funktion som får modellens resonemang medan det
+    pågår. Den hålls utanför det som yield:as, så att tänkandet aldrig kan
+    hamna i svarstexten - samma uppdelning som pa_steg i agentisk_sokning.
     """
     meddelande = (
         f"Fråga: {fraga}\n\n"
@@ -215,13 +219,25 @@ def stromma_svar(klient, fraga, underlag, modell=SVARSMODELL):
     )
     # Ingen temperature-parameter: den är borttagen på Opus 5, Sonnet 5 och
     # 4.7/4.8-familjen. Det är systemprompten som håller svaret vid källorna.
+    #
+    # Opus 5 tänker igenom svaret först, vilket tar några sekunder innan första
+    # tecknet kommer. Tänkandet sker oavsett och kostar lika mycket - display
+    # styr bara om vi får se en sammanfattning av det. Utan den ser pausen ut
+    # som att appen har hängt sig.
     with klient.messages.stream(
         model=modell,
         max_tokens=2000,
+        thinking={"type": "adaptive", "display": "summarized"},
         system=SYSTEMPROMPT,
         messages=[{"role": "user", "content": meddelande}],
     ) as strom:
-        yield from strom.text_stream
+        for handelse in strom:
+            if handelse.type != "content_block_delta":
+                continue
+            if handelse.delta.type == "text_delta":
+                yield handelse.delta.text
+            elif handelse.delta.type == "thinking_delta" and pa_tanke:
+                pa_tanke(handelse.delta.thinking)
 
 
 # ===========================================================================

@@ -149,8 +149,23 @@ if fraga and traffar is not None:
         if st.session_state.svar is None:
             # Första gången strömmar vi svaret medan det skrivs, och sparar
             # den färdiga texten så att senare omkörningar slipper anropet.
+            #
+            # Innan första tecknet kommer tänker modellen i några sekunder. Vi
+            # visar resonemanget i en ruta så länge, så att pausen syns vara
+            # arbete och inte en hängd app. Rutan fälls ihop när svaret börjar.
+            tankestatus = st.status("Claude tänker igenom underlaget ...", expanded=True)
+            tankeruta = tankestatus.empty()
+            tanke = []
+
+            def visa_tanke(bit):
+                tanke.append(bit)
+                tankeruta.markdown("".join(tanke))
+
             st.session_state.svar = st.write_stream(
-                rag.stromma_svar(klient, fraga, st.session_state.underlag))
+                rag.stromma_svar(klient, fraga, st.session_state.underlag,
+                                 pa_tanke=visa_tanke))
+            tankestatus.update(label="Claudes resonemang", state="complete",
+                               expanded=False)
         else:
             st.markdown(st.session_state.svar)
 
