@@ -9,6 +9,7 @@ Startas så här:
 
 import streamlit as st
 
+import bm25
 import rag
 
 st.set_page_config(page_title="Riksdagens anföranden", page_icon="🏛️", layout="wide")
@@ -21,6 +22,19 @@ st.set_page_config(page_title="Riksdagens anföranden", page_icon="🏛️", lay
 def ladda_allt():
     return (rag.oppna_samling(), rag.ladda_modell(), rag.skapa_klient(),
             rag.las_talare())
+
+
+@st.cache_resource(show_spinner="Laddar BM25-index ...")
+def ladda_bm25():
+    """BM25-indexet, eller None om det inte är byggt än.
+
+    Appen ska gå att starta utan indexet - det är 126 MB och byggs separat med
+    `python bm25.py`. Saknas det stänger vi bara av hybridläget.
+    """
+    try:
+        return bm25.ladda()
+    except FileNotFoundError:
+        return None
 
 
 # @st.cache_data cachar returvärden i stället för objekt. Understrecket i
@@ -36,6 +50,7 @@ except RuntimeError as fel:
     st.error(str(fel))
     st.stop()
 
+bm25_index = ladda_bm25()
 partier, (min_ar, max_ar) = filtervarden(samling)
 
 # ---------------------------------------------------------------- sidopanel
@@ -72,6 +87,18 @@ with st.sidebar:
                       help="Fler utdrag ger bredare underlag men dyrare anrop.")
     per_anforande = st.slider("Utdrag per anförande", 1, 3, 1,
                               help="1 ger bredd, högre ger djup i enskilda tal.")
+    # Hybrid är oberoende av läget ovan: läget bestämmer HUR MÅNGA sökningar
+    # som görs, hybrid bestämmer HUR varje enskild sökning går till.
+    if bm25_index is None:
+        hybrid = False
+        st.caption("BM25-indexet saknas. Kör `python bm25.py` för att kunna "
+                   "slå på hybridsökning.")
+    else:
+        hybrid = st.toggle(
+            "Hybridsökning", value=True,
+            help="Kombinerar vektorsökning (betydelse) med BM25 (exakta ord) "
+                 "och väger ihop listorna med Reciprocal Rank Fusion. "
+                 "Av = enbart vektorsökning.")
 
     st.divider()
     st.caption(f"{samling.count():,} utdrag i databasen".replace(",", " "))
@@ -87,7 +114,8 @@ fraga = st.text_input("Din fråga",
 # Streamlit kör om hela skriptet vid varje interaktion - även när du bara
 # fäller ut en källruta. Nyckeln nedan låter oss se om något faktiskt ändrats,
 # så att vi inte betalar för ett nytt API-anrop i onödan.
-nyckel = (fraga, lage, max_varv, valt_parti, talarsokning, fran_ar, till_ar, antal, per_anforande)
+nyckel = (fraga, lage, max_varv, valt_parti, talarsokning, fran_ar, till_ar,
+          antal, per_anforande, hybrid)
 
 if fraga and st.session_state.get("nyckel") != nyckel:
     parti = None if valt_parti == "Alla partier" else valt_parti
@@ -120,14 +148,19 @@ if fraga and st.session_state.get("nyckel") != nyckel:
                 klient, samling, modell, fraga, anvandar_parti=parti,
                 fran_ar=fran_ar, till_ar=till_ar, max_varv=max_varv,
                 per_anforande=per_anforande, pa_steg=visa_steg,
-                alla_talare=alla_talare, anvandar_talare=talarsokning or None)
+                alla_talare=alla_talare, anvandar_talare=talarsokning or None,
+                bm25_index=bm25_index if hybrid else None)
             status.update(label=f"Agenten klar – {len(traffar)} utdrag", state="complete",
                           expanded=False)
         underlag = rag.bygg_underlag_med_luckor(traffar, saknas)
     else:
         where = rag.bygg_filter(parti, fran_ar, till_ar, varianter)
         with st.spinner("Söker i anförandena ..."):
-            traffar = rag.sok(samling, modell, fraga, antal, where, per_anforande)
+            if hybrid:
+                traffar = rag.sok_hybrid(samling, modell, fraga, bm25_index,
+                                         antal, where, per_anforande)
+            else:
+                traffar = rag.sok(samling, modell, fraga, antal, where, per_anforande)
         saknas, spar = [], None
         underlag = rag.bygg_underlag(traffar)
 
@@ -193,6 +226,8 @@ if fraga and traffar is not None:
             m = t["meta"]
             rubrik = (f"{i}. {rag.formatera_talare(m)} · {m['datum']} · "
                       f"likhet {t['likhet']:.3f}")
+            if "rrf" in t:
+                rubrik += f" · rrf {t['rrf']:.4f}"
             with st.expander(rubrik):
                 vanster, hoger = st.columns([3, 1])
                 with vanster:
