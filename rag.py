@@ -14,12 +14,13 @@ from pathlib import Path
 
 import anthropic
 import chromadb
+import numpy as np
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 EMBEDDINGSMODELL = "intfloat/multilingual-e5-large"
-SVARSMODELL = "claude-opus-5"
+SVARSMODELL = "claude-sonnet-5"
 # Planeringen och granskningen är strukturerade rutinuppgifter: bryt ned en
 # fråga, bedöm om träffarna räcker. De behöver inte samma modell som skriver
 # det slutliga svaret, och en snabbare modell märks direkt i väntetiden.
@@ -184,6 +185,143 @@ def sok(samling, modell, fraga, antal=8, where=None, per_anforande=1):
             continue
         tagna[anforande] += 1
         traffar.append({"text": dok, "meta": meta, "likhet": 1 - avstand})
+        if len(traffar) == antal:
+            break
+    return traffar
+
+
+# ===========================================================================
+# Hybridsökning: vektorer + BM25
+# ===========================================================================
+#
+# sok() ovan hittar det som BETYDER ungefär samma sak som frågan. Den är svag
+# på motsatsen: exakta ord. Ett efternamn, "Tidöavtalet", en lagparagraf - där
+# vill man matcha bokstavligt, och då är BM25 i bm25.py bättre.
+#
+# Ingen av dem är bäst på allt, så vi kör båda och väger ihop listorna.
+
+# RRF slår ihop på PLATS I LISTAN, inte på poäng. Det är hela poängen: en
+# cosinuslikhet (0-1) och en BM25-poäng (0-40) går inte att jämföra, men
+# "trea i sin lista" betyder samma sak i båda. Inga vikter att gissa.
+#
+# k dämpar toppen. Med k=60 är skillnaden mellan plats 1 och 2 liten, medan
+# skillnaden mellan att synas och inte synas i en lista är stor. 60 är värdet
+# från originalartikeln och fungerar i praktiken förvånansvärt brett.
+RRF_K = 60
+
+
+def rrf(listor, k=RRF_K):
+    """Slår ihop rangordnade id-listor: poäng(id) = summa av 1/(k + plats)."""
+    poang = Counter()
+    for lista in listor:
+        for plats, chunk_id in enumerate(lista, 1):
+            poang[chunk_id] += 1 / (k + plats)
+    return poang
+
+
+def uppfyller(meta, where):
+    """Prövar ett where-villkor mot en chunks metadata, i Python.
+
+    ChromaDB kan filtrera själv, men gör det genom att gå igenom hela
+    samlingens metadata: ett get() med både id-lista och where tar 3,3 sekunder
+    mot 22 millisekunder utan where. BM25-sidan vet redan exakt vilka chunks
+    den vill ha, så vi hämtar dem ofiltrerat och prövar villkoret här.
+
+    Förstår precis de former bygg_filter() skapar - $and, $in, $gte, $lte och
+    exakt likhet - och ingenting mer.
+    """
+    if not where:
+        return True
+    if "$and" in where:
+        return all(uppfyller(meta, delvillkor) for delvillkor in where["$and"])
+
+    for falt, villkor in where.items():
+        varde = meta.get(falt)
+        if not isinstance(villkor, dict):
+            if varde != villkor:
+                return False
+            continue
+        for operator, jamfor in villkor.items():
+            if operator == "$in" and varde not in jamfor:
+                return False
+            if operator == "$gte" and (varde is None or varde < jamfor):
+                return False
+            if operator == "$lte" and (varde is None or varde > jamfor):
+                return False
+    return True
+
+
+def _bm25_kandidater(samling, bm25_index, fraga, fragevektor, where, djup):
+    """Kör BM25-sökningen och filtrerar träffarna.
+
+    BM25-indexet vet ingenting om parti, år eller talare - det känner bara
+    till chunkarnas id. Vi hämtar därför kandidaternas metadata ur ChromaDB och
+    kontrollerar samma where-villkor som vektorsökningen fick, fast i Python
+    (se uppfyller). Båda sökvägarna utgår från samma villkor och kan alltså
+    aldrig råka filtrera olika.
+
+    Returnerar (id i BM25:s ordning, uppslag id -> träff).
+    """
+    rankade = [chunk_id for chunk_id, _ in bm25_index.sok(fraga, antal=djup)]
+    if not rankade:
+        return [], {}
+
+    svar = samling.get(ids=rankade, include=["documents", "metadatas", "embeddings"])
+    hittade = {}
+    for chunk_id, dok, meta, vektor in zip(svar["ids"], svar["documents"],
+                                           svar["metadatas"], svar["embeddings"]):
+        if not uppfyller(meta, where):
+            continue
+        # Träffen kom från BM25 och har därför ingen cosinuslikhet. Vi räknar
+        # ut den ur chunkens sparade embedding, så att likhet betyder samma sak
+        # oavsett vilken sökväg som hittade utdraget. Båda vektorerna är
+        # normaliserade, så skalärprodukten ÄR cosinuslikheten.
+        hittade[chunk_id] = {"text": dok, "meta": meta,
+                             "likhet": float(np.dot(fragevektor, vektor))}
+    return [chunk_id for chunk_id in rankade if chunk_id in hittade], hittade
+
+
+def sok_hybrid(samling, modell, fraga, bm25_index, antal=8, where=None,
+               per_anforande=1, bm25_djup=500):
+    """Söker med både vektorer och BM25 och slår ihop resultaten med RRF.
+
+    Samma signatur och samma returvärde som sok(), plus fältet "rrf" på varje
+    träff, så att de två sökfunktionerna går att byta mot varandra.
+
+    bm25_djup är hur många BM25-kandidater vi hämtar innan filtreringen. Det
+    behöver vara rejält tilltaget: filtrerar användaren på ett litet parti kan
+    de flesta kandidaterna falla bort, och då vill vi ha fler kvar att välja
+    bland. Det kostar nästan ingenting - BM25-sökningen tar ett par millisekunder.
+    """
+    vektor = modell.encode([f"query: {fraga}"], normalize_embeddings=True)
+    svar = samling.query(
+        query_embeddings=vektor.tolist(),
+        n_results=antal * 3,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+    vektorlista, fran_vektor = [], {}
+    for chunk_id, dok, meta, avstand in zip(svar["ids"][0], svar["documents"][0],
+                                            svar["metadatas"][0], svar["distances"][0]):
+        vektorlista.append(chunk_id)
+        fran_vektor[chunk_id] = {"text": dok, "meta": meta, "likhet": 1 - avstand}
+
+    bm25lista, fran_bm25 = _bm25_kandidater(samling, bm25_index, fraga,
+                                            vektor[0], where, bm25_djup)
+
+    poang = rrf([vektorlista, bm25lista])
+    # Vektorsökningens uppslag läggs sist och vinner vid dubbletter - dess
+    # likhet kommer direkt från ChromaDB och är den exakta.
+    alla = {**fran_bm25, **fran_vektor}
+
+    traffar, tagna = [], Counter()
+    for chunk_id in sorted(poang, key=lambda i: -poang[i]):
+        traff = alla[chunk_id]
+        anforande = traff["meta"]["anforande_id"]
+        if tagna[anforande] >= per_anforande:
+            continue
+        tagna[anforande] += 1
+        traffar.append({**traff, "rrf": poang[chunk_id]})
         if len(traffar) == antal:
             break
     return traffar
@@ -371,7 +509,8 @@ def bedom(klient, fraga, delfragor, traffar, modell=PLANERINGSMODELL):
 def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
                      fran_ar=None, till_ar=None, per_delfraga=3, max_utdrag=24,
                      max_varv=3, per_anforande=1, planeringsmodell=PLANERINGSMODELL,
-                     pa_steg=None, alla_talare=None, anvandar_talare=None):
+                     pa_steg=None, alla_talare=None, anvandar_talare=None,
+                     bm25_index=None):
     """Planerar, söker, granskar och söker om tills underlaget räcker.
 
     pa_steg är en valfri funktion som anropas med varje steg medan loopen kör.
@@ -384,6 +523,20 @@ def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
       spar    - vad som hände i varje varv, för att kunna visas i efterhand
     """
     spar = []
+
+    # Med ett BM25-index kör vi hybridsökning, annars ren vektorsökning. Då
+    # sorterar vi också på RRF-poängen i stället för cosinuslikheten: en
+    # BM25-träff kan vara precis rätt utan att ligga högt i vektorlikhet, och
+    # skulle annars falla bort när listan kapas till max_utdrag.
+    if bm25_index:
+        def sok_ett_varv(sokfraga, where):
+            return sok_hybrid(samling, modell, sokfraga, bm25_index,
+                              per_delfraga, where, per_anforande)
+        ranka = lambda t: -t["rrf"]
+    else:
+        def sok_ett_varv(sokfraga, where):
+            return sok(samling, modell, sokfraga, per_delfraga, where, per_anforande)
+        ranka = lambda t: -t["likhet"]
 
     def logga(steg):
         spar.append(steg)
@@ -406,13 +559,13 @@ def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
             namn = anvandar_talare or d.talare
             where = bygg_filter(anvandar_parti or d.parti, fran_ar, till_ar,
                                 talarvarianter(namn, alla_talare))
-            for t in sok(samling, modell, d.sokfraga, per_delfraga, where, per_anforande):
+            for t in sok_ett_varv(d.sokfraga, where):
                 nyckel = f"{t['meta']['anforande_id']}:{t['meta']['chunk_nr']}"
                 if nyckel not in funna:
                     funna[nyckel] = t
                     nya += 1
 
-        traffar = sorted(funna.values(), key=lambda t: -t["likhet"])[:max_utdrag]
+        traffar = sorted(funna.values(), key=ranka)[:max_utdrag]
         logga({"typ": "sokning", "varv": varv, "nya": nya, "totalt": len(traffar)})
 
         bedomning = bedom(klient, fraga, delfragor, traffar, planeringsmodell)
@@ -429,7 +582,7 @@ def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
             break
         delfragor = bedomning.nya_sokningar
 
-    return sorted(funna.values(), key=lambda t: -t["likhet"])[:max_utdrag], saknas, spar
+    return sorted(funna.values(), key=ranka)[:max_utdrag], saknas, spar
 
 
 def bygg_underlag_med_luckor(traffar, saknas):

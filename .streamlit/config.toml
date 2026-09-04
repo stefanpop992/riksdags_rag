@@ -1,0 +1,33 @@
+# Tema för app.py. Streamlit läser den här filen automatiskt vid start.
+#
+# Tanken: verktyget läser riksdagsprotokoll, så det ska se ut som ett
+# researchverktyg och inte som en demo. Därav marinblått i stället för
+# Streamlits standardröda, seriffer i rubrikerna för en redaktionell känsla,
+# och små hörnradier - rundade bubblor läser som leksak, skarpa kanter som
+# dokument.
+
+[theme]
+# Sans i brödtexten för läsbarhet, serif i rubrikerna för tyngd. Båda är
+# inbyggda familjer, så inga typsnitt behöver hämtas över nätet.
+font = "sans-serif"
+headingFont = "serif"
+baseFontSize = 15
+baseRadius = "small"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#123B63"            # marinblå - knappar, reglage, fokus
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F5F8"  # sidopanel och källrutor
+textColor = "#171A1D"
+linkColor = "#123B63"
+borderColor = "#DCE2E9"
+
+[theme.dark]
+primaryColor = "#6FA5DA"            # ljusare blå, annars syns den inte mot mörk botten
+backgroundColor = "#0E1318"
+secondaryBackgroundColor = "#161C23"
+textColor = "#E4E9EE"
+linkColor = "#8FBEE8"
+borderColor = "#2A333C"
