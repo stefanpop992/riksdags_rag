@@ -12,7 +12,25 @@ import streamlit as st
 import bm25
 import rag
 
-st.set_page_config(page_title="Riksdagens anföranden", page_icon="🏛️", layout="wide")
+st.set_page_config(page_title="Riksdagens anföranden", page_icon="🏛️", layout="wide",
+                   initial_sidebar_state="expanded")
+
+st.html("""
+<style>
+    .stMainBlockContainer { max-width: 1120px; padding-top: 2.5rem; padding-bottom: 4rem; }
+    [data-testid="stSidebar"] h2 { font-family: sans-serif; font-size: 1.05rem; }
+    h1 { letter-spacing: -0.035em; }
+    h2, h3 { letter-spacing: -0.02em; }
+    [data-testid="stForm"] { border-radius: 12px; padding: 1.5rem; }
+    [data-testid="stExpander"] { border-radius: 8px; }
+    .intro-label { color: #66839c; font-size: .75rem; font-weight: 700;
+                   letter-spacing: .16em; margin-bottom: .5rem; }
+    @media (max-width: 640px) {
+        .stMainBlockContainer { padding-top: 1.25rem; }
+        [data-testid="stForm"] { padding: 1rem; }
+    }
+</style>
+""")
 
 
 # @st.cache_resource kör funktionen EN gång och återanvänder resultatet i alla
@@ -55,13 +73,15 @@ partier, (min_ar, max_ar) = filtervarden(samling)
 
 # ---------------------------------------------------------------- sidopanel
 with st.sidebar:
-    st.header("Läge")
+    st.markdown("### Avgränsa din sökning")
+    st.caption("Välj hur du vill söka och vilka anföranden som ska ingå.")
+    st.header("Sökläge")
     lage = st.radio(
-        "Hur underlaget hämtas", ["Naivt", "Agentiskt"], horizontal=True,
-        captions=["En sökning, ett svar. Snabbt.",
-                  "Modellen planerar, granskar och söker om. Långsammare och dyrare."],
+        "Hur underlaget hämtas", ["Snabb överblick", "Fördjupad analys"], horizontal=True,
+        captions=["En sökning med ett sammanfattat svar.",
+                  "Flera sökningar och granskning. Tar längre tid och kostar mer."],
     )
-    if lage == "Agentiskt":
+    if lage == "Fördjupad analys":
         max_varv = st.slider("Max sökvarv", 1, 4, 3)
     else:
         max_varv = 1
@@ -82,52 +102,72 @@ with st.sidebar:
     if (fran_ar, till_ar) == (min_ar, max_ar):
         fran_ar = till_ar = None
 
-    st.header("Sökning")
-    antal = st.slider("Antal utdrag", 3, 15, 8,
-                      help="Fler utdrag ger bredare underlag men dyrare anrop.")
-    per_anforande = st.slider("Utdrag per anförande", 1, 3, 1,
-                              help="1 ger bredd, högre ger djup i enskilda tal.")
-    # Hybrid är oberoende av läget ovan: läget bestämmer HUR MÅNGA sökningar
-    # som görs, hybrid bestämmer HUR varje enskild sökning går till.
-    if bm25_index is None:
-        hybrid = False
-        st.caption("BM25-indexet saknas. Kör `python bm25.py` för att kunna "
-                   "slå på hybridsökning.")
-    else:
+    with st.expander("Avancerade sökinställningar"):
+        antal = st.slider("Antal utdrag", 3, 15, 8,
+                          disabled=lage == "Fördjupad analys",
+                          help="Gäller snabb överblick. Fler utdrag ger bredare underlag.")
+        per_anforande = st.slider("Utdrag per anförande", 1, 3, 1,
+                                  help="Ett utdrag ger fler röster. Fler ger mer sammanhang.")
         hybrid = st.toggle(
-            "Hybridsökning", value=True,
-            help="Kombinerar vektorsökning (betydelse) med BM25 (exakta ord) "
-                 "och väger ihop listorna med Reciprocal Rank Fusion. "
-                 "Av = enbart vektorsökning.")
+            "Matcha både ord och betydelse", value=bm25_index is not None,
+            disabled=bm25_index is None,
+            help="Kombinerar exakta ordträffar med sökning på betydelse.")
+        if bm25_index is None:
+            st.caption("Ordsökning är inte tillgänglig. Sökning på betydelse är aktiv.")
 
     st.divider()
     st.caption(f"{samling.count():,} utdrag i databasen".replace(",", " "))
 
 # ------------------------------------------------------------------- huvudyta
-st.title("🏛️ Riksdagens anföranden")
-st.caption("Ställ en fråga om vad som sagts i kammaren. Svaren bygger enbart "
-           "på de utdrag som visas längst ned, och varje påstående ska ha en källa.")
+st.html('<div class="intro-label">RIKSDAGEN · UTFORSKA DEBATTEN</div>')
+st.title("Vad har sagts i kammaren?")
+st.markdown("Utforska riksdagens anföranden. Få en sammanfattning med källor "
+            "och läs vad ledamöterna själva har sagt.")
+st.caption(f"Anföranden {min_ar}–{max_ar} · {len(partier)} partier · Svar på svenska")
 
-fraga = st.text_input("Din fråga",
-                      placeholder="Vad har partierna sagt om vinster i välfärden?")
 
-# Streamlit kör om hela skriptet vid varje interaktion - även när du bara
-# fäller ut en källruta. Nyckeln nedan låter oss se om något faktiskt ändrats,
-# så att vi inte betalar för ett nytt API-anrop i onödan.
+def valj_exempel(fraga):
+    st.session_state.fragefalt = fraga
+
+
+with st.form("sokformular"):
+    fraga = st.text_input(
+        "Vad vill du veta?", key="fragefalt",
+        placeholder="Till exempel: Vad har partierna sagt om vinster i välfärden?").strip()
+    sok_klickad = st.form_submit_button("Sök i anförandena", type="primary")
+    st.caption("Svaren bygger på hittade utdrag. Du kan granska källorna under svaret.")
+
+talarsokning = talarsokning.strip()
+if sok_klickad and not fraga:
+    st.warning("Skriv en fråga för att börja söka.")
+
+if st.session_state.get("traffar") is None:
+    st.markdown("#### Börja med en fråga")
+    for kolumn, (etikett, exempel) in zip(st.columns(3), [
+        ("Energi & klimat", "Vad har partierna sagt om kärnkraft?"),
+        ("Vård & välfärd", "Vad har sagts om att korta vårdköerna?"),
+        ("Skola & utbildning", "Vad har partierna sagt om friskolor?"),
+    ]):
+        kolumn.button(etikett, on_click=valj_exempel, args=(exempel,),
+                      use_container_width=True)
+    st.caption("Välj ett exempel, anpassa frågan och tryck på Sök i anförandena.")
+
+# Streamlit kör om skriptet när ett filter ändras. Bara sökknappen får starta
+# en sökning. Nyckeln kopplar det sparade svaret till rätt fråga och filter.
 nyckel = (fraga, lage, max_varv, valt_parti, talarsokning, fran_ar, till_ar,
           antal, per_anforande, hybrid)
 
-if fraga and st.session_state.get("nyckel") != nyckel:
+if sok_klickad and fraga:
     parti = None if valt_parti == "Alla partier" else valt_parti
     varianter = rag.talarvarianter(talarsokning, alla_talare)
     if talarsokning and not varianter:
         st.warning(f"Hittade ingen talare som matchar {talarsokning!r}.")
         st.stop()
 
-    if lage == "Agentiskt":
+    if lage == "Fördjupad analys":
         # st.status visar en logg som fylls på medan agenten arbetar. Vi skickar
         # in en callback som skriver in varje steg där.
-        with st.status("Agenten arbetar ...", expanded=True) as status:
+        with st.status("Söker och granskar underlaget ...", expanded=True) as status:
             def visa_steg(steg):
                 if steg["typ"] == "plan":
                     status.write(f"**Plan:** {len(steg['delfragor'])} delfrågor")
@@ -150,7 +190,7 @@ if fraga and st.session_state.get("nyckel") != nyckel:
                 per_anforande=per_anforande, pa_steg=visa_steg,
                 alla_talare=alla_talare, anvandar_talare=talarsokning or None,
                 bm25_index=bm25_index if hybrid else None)
-            status.update(label=f"Agenten klar – {len(traffar)} utdrag", state="complete",
+            status.update(label=f"Granskning klar – {len(traffar)} utdrag", state="complete",
                           expanded=False)
         underlag = rag.bygg_underlag_med_luckor(traffar, saknas)
     else:
@@ -173,13 +213,21 @@ if fraga and st.session_state.get("nyckel") != nyckel:
 
 traffar = st.session_state.get("traffar")
 
-if fraga and traffar is not None:
+if traffar is not None:
+    sparad_fraga = st.session_state.nyckel[0]
+    if st.session_state.nyckel != nyckel:
+        st.info("Frågan eller filtren har ändrats. Klicka på Sök i anförandena "
+                "för att uppdatera resultatet.")
+    st.divider()
+    st.markdown("### Sökresultat")
+    st.write(sparad_fraga)
     if not traffar:
         st.warning("Sökningen gav inga träffar. Prova en bredare fråga eller "
                    "lossa på filtren i sidopanelen.")
     else:
-        st.subheader("Svar")
-        if st.session_state.svar is None:
+        st.caption(f"{len(traffar)} källutdrag · {st.session_state.nyckel[1]}")
+        st.subheader("Sammanfattning")
+        if st.session_state.svar is None and sok_klickad:
             # Första gången strömmar vi svaret medan det skrivs, och sparar
             # den färdiga texten så att senare omkörningar slipper anropet.
             #
@@ -195,15 +243,21 @@ if fraga and traffar is not None:
                 tankeruta.markdown("".join(tanke))
 
             st.session_state.svar = st.write_stream(
-                rag.stromma_svar(klient, fraga, st.session_state.underlag,
+                rag.stromma_svar(klient, sparad_fraga, st.session_state.underlag,
                                  pa_tanke=visa_tanke))
             tankestatus.update(label="Claudes resonemang", state="complete",
                                expanded=False)
-        else:
+        elif st.session_state.svar is not None:
             st.markdown(st.session_state.svar)
+        else:
+            st.info("Svaret blev inte färdigt. Klicka på Sök i anförandena för att försöka igen.")
+
+        if st.session_state.svar:
+            st.download_button("Spara svaret", st.session_state.svar,
+                               file_name="riksdagen-svar.md", mime="text/markdown")
 
         if st.session_state.get("spar"):
-            with st.expander(f"Agentens arbete ({len(st.session_state.spar)} steg)"):
+            with st.expander(f"Så gjordes sökningen ({len(st.session_state.spar)} steg)"):
                 for steg in st.session_state.spar:
                     if steg["typ"] == "plan":
                         st.markdown(f"**Plan** – {len(steg['delfragor'])} delfrågor")
@@ -222,12 +276,10 @@ if fraga and traffar is not None:
                         st.markdown(f"**Stopp** – {steg['skal']}")
 
         st.subheader(f"Källor ({len(traffar)} utdrag)")
+        st.caption("Öppna ett utdrag för att läsa underlaget och gå vidare till hela anförandet.")
         for i, t in enumerate(traffar, 1):
             m = t["meta"]
-            rubrik = (f"{i}. {rag.formatera_talare(m)} · {m['datum']} · "
-                      f"likhet {t['likhet']:.3f}")
-            if "rrf" in t:
-                rubrik += f" · rrf {t['rrf']:.4f}"
+            rubrik = f"{i}. {rag.formatera_talare(m)} · {m['datum']}"
             with st.expander(rubrik):
                 vanster, hoger = st.columns([3, 1])
                 with vanster:
