@@ -545,34 +545,59 @@ def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
 
     if alla_talare is None:
         alla_talare = las_talare()
+    if anvandar_talare and not talarvarianter(anvandar_talare, alla_talare):
+        raise ValueError(f'Ingen talare matchar ”{anvandar_talare}”. Prova ett efternamn.')
 
     delfragor = planera(klient, fraga, planeringsmodell)
     logga({"typ": "plan", "delfragor": delfragor})
 
     funna = {}   # chunk-id -> träff, så samma utdrag inte räknas två gånger
     saknas = []
+    talarluckor = []
+
+    def valj_utdrag():
+        # Gränsen gäller hela underlaget, även när olika delfrågor hittar
+        # olika chunks ur samma anförande. Granskaren och svaret får samma urval.
+        valda, tagna = [], Counter()
+        for traff in sorted(funna.values(), key=ranka):
+            anforande = traff["meta"]["anforande_id"]
+            if tagna[anforande] >= per_anforande:
+                continue
+            tagna[anforande] += 1
+            valda.append(traff)
+            if len(valda) == max_utdrag:
+                break
+        return valda
 
     for varv in range(1, max_varv + 1):
         nya = 0
         for d in delfragor:
             # Användarens egna filter i sidopanelen vinner över planens.
             namn = anvandar_talare or d.talare
+            varianter = talarvarianter(namn, alla_talare)
+            if namn and not varianter:
+                # En tom lista skulle ta bort talarfiltret i bygg_filter().
+                # Behåll avgränsningen genom att avstå från denna delfråga.
+                lucka = f'Ingen talare i arkivet matchar ”{namn}”.'
+                if lucka not in talarluckor:
+                    talarluckor.append(lucka)
+                continue
             where = bygg_filter(anvandar_parti or d.parti, fran_ar, till_ar,
-                                talarvarianter(namn, alla_talare))
+                                varianter)
             for t in sok_ett_varv(d.sokfraga, where):
                 nyckel = f"{t['meta']['anforande_id']}:{t['meta']['chunk_nr']}"
                 if nyckel not in funna:
                     funna[nyckel] = t
                     nya += 1
 
-        traffar = sorted(funna.values(), key=ranka)[:max_utdrag]
+        traffar = valj_utdrag()
         logga({"typ": "sokning", "varv": varv, "nya": nya, "totalt": len(traffar)})
 
         bedomning = bedom(klient, fraga, delfragor, traffar, planeringsmodell)
-        saknas = bedomning.saknas
+        saknas = list(dict.fromkeys(talarluckor + bedomning.saknas))
         logga({"typ": "bedomning", "varv": varv,
                "racker": bedomning.racker_underlaget,
-               "saknas": bedomning.saknas,
+               "saknas": saknas,
                "nya_sokningar": bedomning.nya_sokningar})
 
         if bedomning.racker_underlaget or not bedomning.nya_sokningar:
@@ -582,7 +607,7 @@ def agentisk_sokning(klient, samling, modell, fraga, anvandar_parti=None,
             break
         delfragor = bedomning.nya_sokningar
 
-    return sorted(funna.values(), key=ranka)[:max_utdrag], saknas, spar
+    return valj_utdrag(), saknas, spar
 
 
 def bygg_underlag_med_luckor(traffar, saknas):
