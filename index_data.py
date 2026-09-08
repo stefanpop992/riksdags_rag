@@ -98,7 +98,7 @@ def dela_i_chunks(stycken, max_ord=MAX_ORD, overlapp_ord=OVERLAPP_ORD):
             # Ta med förra stycket in i nästa chunk, men bara om det är kort
             # nog att inte äta upp budgeten.
             sista = nuvarande[-1]
-            if len(sista.split()) <= overlapp_ord:
+            if len(sista.split()) <= overlapp_ord and len(sista.split()) + n <= max_ord:
                 nuvarande, antal = [sista], len(sista.split())
             else:
                 nuvarande, antal = [], 0
