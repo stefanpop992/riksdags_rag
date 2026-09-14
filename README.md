@@ -1,4 +1,4 @@
-# Kammaren — search Swedish parliamentary speeches
+# Kammaren | Search Swedish parliamentary speeches
 
 A local RAG application for exploring what members of Sweden's parliament have
 said in debates. Ask a question in Swedish, filter by party, speaker or year, and
@@ -6,6 +6,23 @@ inspect the source excerpts behind a streamed answer.
 
 The project explores a practical retrieval question: when does one search suffice,
 and when does a question need several searches across speakers or parties?
+
+**Stack:** Python · ChromaDB · multilingual E5 · BM25 · Anthropic API
+
+**Status:** Local application under development.
+
+## Project at a glance
+
+| Question | What this project explores |
+| --- | --- |
+| Who is it for? | Readers exploring statements in Swedish parliamentary debates |
+| How are sources found? | Vector and keyword retrieval, with party, speaker and year filters |
+| What makes deep search different? | A bounded planning loop can request additional evidence |
+| What has been evaluated? | Two earlier vector-search modes on 30 questions; see [results and limitations](#evaluation-and-its-limits) |
+| What can be inspected? | Source excerpts, original links, test cases and evaluation code |
+
+See [Architecture](#architecture), [Run locally](#run-locally) and
+[Reliability checks](#reliability-checks) for implementation and setup details.
 
 ## Functionality
 
@@ -57,7 +74,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Create a local `.env` file containing `ANTHROPIC_API_KEY=your-key`. This file is
+Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`. This file is
 ignored by Git; the key stays on the server. API calls incur charges.
 
 If you already have `chroma_db/` and `data/`, start the website:
@@ -126,26 +143,23 @@ actually have supporting material in the archive; that category needs revision.
 Running it again does not automatically remeasure saved questions. Preserve the
 historical results separately before creating a new benchmark.
 
-## Portfolio demo
+## Usage examples
 
-1. Ask a narrow question, such as “Vad har sagts om slutförvar av använt kärnbränsle?”
-2. Expand a source and follow its original link to inspect the supporting material.
-3. Compare quick and deep mode on “Vad tycker partierna om kärnkraft?”
-4. Apply a speaker and year filter, then try an unknown speaker or a filter with
-   no results to demonstrate the failure behavior.
-5. Export an answer and explain the tradeoff between source coverage, latency
-   and the extra API calls in deep mode.
+- Ask “Vad har sagts om slutförvar av använt kärnbränsle?” to search a specific topic.
+- Use deep search for a broader question such as “Vad tycker partierna om kärnkraft?”
+- Narrow the results by party, speaker or year, then expand the source excerpts
+  and follow their original links.
+- Export the answer and source list as Markdown.
 
-## Remaining work
+## Current limitations
 
-- Benchmark hybrid retrieval and manually annotate a small set of relevant
-  excerpts and genuinely unanswerable questions.
-- Record a live end-to-end demo and verify API failures and interrupted streams.
-- Keep the vector index, BM25 index and cached `data/talare.json` in sync when
-  updating the archive. Automatic refresh is not implemented.
-- Make answer citations clickable within the answer and add search cancellation.
+- The application accepts one active search at a time; search cancellation is
+  not implemented.
+- Dataset updates require keeping the vector index, BM25 index and cached
+  `data/talare.json` in sync. Automatic refresh is not implemented.
+- Dependency versions have lower bounds rather than a reproducible lock file.
+- The chunking fix applies to newly indexed material; existing chunks are not
+  automatically rebuilt.
 
-The application currently accepts one active search at a time. Dependency
-versions have lower bounds rather than a reproducible lock file. The chunking
-fix applies to newly indexed material; existing chunks are not automatically
-rebuilt. Public deployment is outside the current portfolio milestone.
+Hybrid retrieval has not yet been benchmarked. The historical evaluation and
+its measurement limits are described above.
