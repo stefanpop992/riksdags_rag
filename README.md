@@ -11,6 +11,10 @@ and when does a question need several searches across speakers or parties?
 
 **Status:** Local application under development.
 
+<p align="center">
+  <img src="docs/images/start_page.png" alt="Kammaren search interface" width="900">
+</p>
+
 ## Project at a glance
 
 | Question | What this project explores |
@@ -41,6 +45,16 @@ See [Architecture](#architecture), [Run locally](#run-locally) and
 Answers describe what speakers said; they do not establish that those statements
 are true or represent a party's complete policy. Missing evidence is passed to
 the answer model as an explicit limitation.
+
+## Screenshots
+
+### Search with party, speaker and year filters
+
+![Filtered search in Kammaren](docs/images/question_filter.png)
+
+### Answer with inspectable source excerpts
+
+![Generated answer and parliamentary source excerpts](docs/images/answer_source.png)
 
 ## Architecture
 
